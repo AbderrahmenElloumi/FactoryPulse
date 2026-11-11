@@ -397,11 +397,21 @@ def test_public_repository_carries_every_triage_label():
 
 @needs_github
 def test_github_detects_the_templates_and_guide_on_the_public_repository():
+    owner, name = PUBLIC.split("/")
+    query = (
+        f'{{repository(owner:"{owner}",name:"{name}"){{'
+        "issueTemplates{filename labels(first:10){nodes{name}}} "
+        "pullRequestTemplates{filename}}}"
+    )
+    repository = _gh_json("api", "graphql", "-f", f"query={query}")["data"]["repository"]
+    issue_templates = repository["issueTemplates"]
+    assert sorted(t["filename"] for t in issue_templates) == sorted(p.name for p in TEMPLATES.iterdir())
+    # GitHub drops a template label that does not exist on the repository.
+    for template in issue_templates:
+        assert template["labels"]["nodes"], template["filename"]
+    assert [t["filename"] for t in repository["pullRequestTemplates"]] == ["pull_request_template.md"]
     files = _gh_json("api", f"repos/{PUBLIC}/community/profile")["files"]
-    assert files["pull_request_template"], "pull request template not detected"
     assert files["contributing"], "contributing guide not detected"
-    listed = _gh_json("api", f"repos/{PUBLIC}/contents/.github/ISSUE_TEMPLATE")
-    assert sorted(f["name"] for f in listed) == sorted(p.name for p in TEMPLATES.iterdir())
 
 
 @needs_github
