@@ -1,0 +1,32 @@
+# dbt profile for the local FactoryPulse lake (ticket 05).
+#
+# Two session targets, same models:
+#   lake     — builds the marts over the raw Delta lake on MinIO.
+#   fixture  — builds the same models over the seeded fixture, with local
+#              file locations, so the hourly aggregate is asserted against
+#              hand-computed numbers with no MinIO, no Kafka and no network.
+#
+# `method: session` runs Spark in-process: the dbt image ships Java and
+# PySpark, and the jars arrive through PYSPARK_SUBMIT_ARGS (see
+# scripts/dbt-entrypoint.sh) — the same rule as every other in-process
+# PySpark driver in this repo.
+#
+# dbt's session catalog is throwaway bookkeeping. The durable output is the
+# Delta directory each model names in its `location_root` config, which is what
+# the rest of the pipeline reads. (`location_root`, not `location`: a wrong key
+# is silently ignored and the model builds as a managed table.)
+factorypulse:
+  target: lake
+  outputs:
+    lake:
+      type: spark
+      method: session
+      schema: factorypulse
+      host: NA  # required by the adapter, ignored by method: session
+      threads: 1
+    fixture:
+      type: spark
+      method: session
+      schema: factorypulse_fixture
+      host: NA
+      threads: 1

@@ -1,0 +1,13 @@
+event_id,ts,site_id,machine_id,sensor_type,value,unit,status
+00000000-0000-4000-8000-000000000001,2026-03-01T10:05:00.000Z,site-a,site-a-machine-01,temperature,70.0,celsius,nominal
+00000000-0000-4000-8000-000000000002,2026-03-01T10:15:00.000Z,site-a,site-a-machine-01,temperature,80.0,celsius,warning
+00000000-0000-4000-8000-000000000003,2026-03-01T10:20:00.000Z,site-a,site-a-machine-01,vibration,1.0,g_pp,nominal
+00000000-0000-4000-8000-000000000004,2026-03-01T10:25:00.000Z,site-a,site-a-machine-01,vibration,3.0,g_pp,critical
+00000000-0000-4000-8000-000000000005,2026-03-01T10:30:00.000Z,site-a,site-a-machine-02,pressure,85.0,psi,nominal
+00000000-0000-4000-8000-000000000005,2026-03-01T10:31:00.000Z,site-a,site-a-machine-02,pressure,90.0,psi,nominal
+00000000-0000-4000-8000-000000000006,2026-03-01T10:45:00.000Z,site-a,site-a-machine-02,humidity,55.0,percent,nominal
+00000000-0000-4000-8000-000000000007,2026-03-01T10:40:00.000Z,site-b,site-b-machine-01,temperature,65.0,celsius,nominal
+00000000-0000-4000-8000-000000000008,2026-03-01T11:05:00.000Z,site-a,site-a-machine-01,temperature,75.0,celsius,nominal
+00000000-0000-4000-8000-000000000009,2026-03-01T11:10:00.000Z,site-a,site-a-machine-01,vibration,1.2,g_pp,nominal
+00000000-0000-4000-8000-000000000010,2026-03-01T11:35:00.000Z,site-a,site-a-machine-02,pressure,130.0,psi,critical
+00000000-0000-4000-8000-000000000011,2026-03-01T11:50:00.000Z,site-a,site-a-machine-02,humidity,60.0,percent,nominal

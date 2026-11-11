@@ -1,0 +1,27 @@
+# Local Python environment (not part of the repo / container images)
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+.env
+
+# Editors / OS
+.DS_Store
+Thumbs.db
+
+# Unnecessary Notebook scratches, teaching materials (curated elsewhere)
+teaching/
+.scratch/factorypulse/gotchas.md
+
+# Claude local preferences
+.claude/settings.local.json
+# dbt run artifacts (written by scripts/dbt-entrypoint.sh)
+dbt/target/
+dbt/logs/
+dbt/metastore_db/
+dbt/derby.log
+dbt/.user.yml
+data/

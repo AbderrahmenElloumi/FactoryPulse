@@ -1,0 +1,4 @@
+# Runtime deps for the producer container only (docker/producer.Dockerfile).
+# Imported lazily in factorypulse.producer so the host venv never needs them.
+kafka-python-ng>=2.2,<3
+minio>=7.2,<8

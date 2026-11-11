@@ -1,0 +1,408 @@
+# FactoryPulse local platform — everything runs here, nothing else.
+#
+# Single-command local infra, $0 cost: Kafka in KRaft mode (single node,
+# no ZooKeeper) and MinIO object storage, pre-initialized with the
+# `sensor-events` topic and the `factorypulse` bucket the pipeline uses.
+#
+#   docker compose up -d
+#
+# Credentials come from .env: copy .env.example to .env first. Compose
+# interpolates them; none is written in this file.
+#
+# Ports:
+#   9000  MinIO S3 API        (used by Spark via S3a)
+#   9001  MinIO web console
+#   9092  Kafka bootstrap     (used by the simulator producer & Spark)
+#   8501  Streamlit dashboard (127.0.0.1 only)
+
+name: factorypulse
+
+# Shared build / env / volumes for the Spark job services (anchored so every
+# job stays a tiny `<<: *spark-job` + command). They all run the same image
+# and mount the repo (jobs + src); PYTHONPATH makes both the `spark` package
+# and the `factorypulse` package importable inside Spark.
+x-spark-job: &spark-job
+  build:
+    context: .
+    dockerfile: docker/spark.Dockerfile
+  image: factorypulse/spark:3.5
+  environment: &spark-env
+    KAFKA_BOOTSTRAP: kafka:9092
+    KAFKA_TOPIC: sensor-events
+    MINIO_ENDPOINT: minio:9000
+    MINIO_SECURE: "false"
+    MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-}
+    MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-}
+    MINIO_BUCKET: factorypulse
+    # Connector jars, passed to spark-submit --packages (the in-process
+    # SparkSession builder silently ignores spark.jars.packages, so the jars
+    # must arrive on the spark-submit CLI). Single source of truth here;
+    # keep in sync with spark/common.py::PACKAGES and the Dockerfile ARG.
+    SPARK_JAR_PACKAGES: org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.4,io.delta:delta-spark_2.12:3.2.1,org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.780
+    PYTHONPATH: /opt/src:/opt/app
+  volumes: &spark-mounts
+    - ./spark:/opt/app
+    - ./src:/opt/src
+  entrypoint: ["/bin/bash", "-lc"]
+
+# Shared by the Airflow services (ticket 06). Airflow is a pure orchestrator:
+# a task runs a driver step (`bash scripts/lake.sh batch`, ...), which runs
+# `docker compose run --rm <service>` against the host daemon. Own profile, so
+# `docker compose up -d` still brings up only the platform:
+#
+#   docker compose --profile airflow up -d      UI on http://localhost:8080
+#
+# LocalExecutor over SQLite: no database server, $0, local-only. The metadata
+# database and the task logs live in the airflow-data volume.
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: docker/airflow.Dockerfile
+  image: factorypulse/airflow:3.4.0
+  environment:
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////opt/airflow/airflow.db
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    # The DAGs schedule themselves as soon as Airflow is up: with catchup off,
+    # the first start runs the latest daily interval right away.
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+    # One task at a time across both DAGs: each task is a Spark JVM or a dbt
+    # session, and a laptop runs one comfortably. It does not order the two
+    # DAGs: a daily task can still run between the weekly build and the
+    # weekly check, which then fails until the weekly run is cleared.
+    AIRFLOW__CORE__PARALLELISM: "1"
+    # Tasks report to the API server, which also serves the UI.
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-webserver:8080/execution/
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET:-}
+    # No login: the UI is published on 127.0.0.1 only.
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "true"
+    # Where the repository is mounted, and the tasks' working directory. Must
+    # be the path the Docker daemon knows the repository by, because the
+    # daemon resolves the job services' relative bind mounts (./spark, ./src,
+    # ./dbt) against it. Set it in .env (see .env.example). Unset, it stays
+    # empty and the DAG file refuses to load, naming it. (`:?` would fail
+    # every compose command, the platform's included, whenever .env is absent.)
+    FACTORYPULSE_HOST_DIR: ${FACTORYPULSE_HOST_DIR:-}
+  volumes:
+    - airflow-data:/opt/airflow
+    - ./dags:/opt/airflow/dags:ro
+  profiles: ["airflow"]
+
+services:
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    # Unset in .env, the credentials interpolate to empty strings, and MinIO
+    # would start on its built-in default login. It refuses instead, naming
+    # them, and every service that needs it then fails to start.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        if [ -z "$$MINIO_ROOT_USER" ] || [ -z "$$MINIO_ROOT_PASSWORD" ]; then
+          echo "MINIO_ACCESS_KEY and MINIO_SECRET_KEY are not set: copy .env.example to .env" >&2
+          exit 1
+        fi
+        exec /usr/bin/docker-entrypoint.sh minio server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9000/minio/health/live || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  # One-shot job: create the pipeline's bucket (idempotent).
+  minio-init:
+    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    environment:
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        mc alias set local http://minio:9000 "$$MINIO_ACCESS_KEY" "$$MINIO_SECRET_KEY"
+        mc mb --ignore-existing local/factorypulse
+        echo "bucket-init: factorypulse ready"
+    depends_on:
+      minio:
+        condition: service_healthy
+    restart: "no"
+
+  kafka:
+    image: apache/kafka:4.1.1
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      # Every pipeline consumer (kafka-init, Spark, simulator) lives inside
+      # the compose network, so the advertised listener must be the service
+      # name `kafka`, not `localhost` — a localhost:9092 advertisement would
+      # make each consumer dial *itself* and time out.
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_LOG_DIRS: /tmp/kraft-combined-logs
+    ports:
+      - "9092:9092"
+    # Note: no named volume for logs. apache/kafka runs as a non-root
+    # user (appuser:1000) so a root-owned named volume would fail with
+    # AccessDeniedException; and Kafka is a transport buffer here — the
+    # durable lake lives in MinIO. The topic is re-created idempotently
+    # by kafka-init on every startup, so a restarted broker self-heals.
+    volumes: []
+    # The image does not put kafka-topics.sh on its PATH: call it by its
+    # absolute path, here and in kafka-init.
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 15s
+    restart: unless-stopped
+
+  # One-shot job: create the sensor-events topic (idempotent).
+  kafka-init:
+    image: apache/kafka:4.1.1
+    entrypoint: ["/opt/kafka/bin/kafka-topics.sh"]
+    command: ["--bootstrap-server", "kafka:9092", "--create", "--if-not-exists", "--topic", "sensor-events", "--partitions", "1", "--replication-factor", "1"]
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: "no"
+
+  # ================= Phase 2 ingestion (ticket 04) =================
+  # simulator → Kafka → Spark Structured Streaming → Delta table on MinIO,
+  # with a batch path that reprocesses historical events into the same lake.
+
+  # One-shot producer: generate events from the ticket-02 simulator, publish
+  # them to the sensor-events topic (keyed by event_id), and drop the
+  # deterministic JSONL snapshot into MinIO backfill/ for the batch path.
+  # Re-runnable with:  docker compose run --rm producer
+  producer:
+    build:
+      context: .
+      dockerfile: docker/producer.Dockerfile
+    image: factorypulse/producer
+    environment:
+      KAFKA_BOOTSTRAP: kafka:9092
+      KAFKA_TOPIC: sensor-events
+      MINIO_ENDPOINT: minio:9000
+      MINIO_SECURE: "false"
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-}
+      MINIO_BUCKET: factorypulse
+    command: ["--records-per-day", "2000", "--seed", "42"]
+    depends_on:
+      kafka: { condition: service_healthy }
+      minio: { condition: service_healthy }
+    profiles: ["lake-jobs"]
+    restart: "no"
+
+  # Long-running streamer: Kafka → Spark Structured Streaming → raw Delta lake.
+  streamer:
+    <<: *spark-job
+    command: ["exec /opt/spark/bin/spark-submit --master local[*] --packages \"$$SPARK_JAR_PACKAGES\" /opt/app/streaming_ingest.py"]
+    depends_on:
+      kafka: { condition: service_healthy }
+      minio: { condition: service_healthy }
+    restart: unless-stopped
+
+  # One-shot batch: reprocess the MinIO backfill snapshot into the same Delta
+  # lake (idempotent MERGE on event_id). Run with:
+  #   docker compose run --rm batch-ingest
+  batch-ingest:
+    <<: *spark-job
+    command: ["exec /opt/spark/bin/spark-submit --master local[*] --packages \"$$SPARK_JAR_PACKAGES\" /opt/app/batch_ingest.py"]
+    depends_on:
+      minio: { condition: service_healthy }
+    profiles: ["lake-jobs"]
+    restart: "no"
+
+  # One-shot query: Spark SQL read of the raw Delta lake (demo/verification).
+  #   docker compose run --rm query
+  query:
+    <<: *spark-job
+    command: ["exec /opt/spark/bin/spark-submit --master local[*] --packages \"$$SPARK_JAR_PACKAGES\" /opt/app/query_lake.py"]
+    depends_on:
+      minio: { condition: service_healthy }
+    profiles: ["lake-jobs"]
+    restart: "no"
+
+  # ================= Phase 4 transformation (ticket 05) =================
+  # dbt-spark builds the analytics layer over the raw lake. It reuses the same
+  # Spark image/runtime (built with INSTALL_DBT=true, which only adds the dbt
+  # pip packages on top of the warmed Ivy cache), so the marts are written by
+  # the same Delta + S3a stack that produced the raw events.
+  #
+  # One-shot: DBT_ARGS goes to the entrypoint's `dbt` call, set by
+  # scripts/dbt.sh. Examples:
+  #   docker compose run --rm -e DBT_ARGS="build --target lake" dbt
+  #   docker compose run --rm -e DBT_ARGS='build --target fixture --vars {"lake_root":"/tmp/fp-fixture"}' dbt
+  #
+  # No depends_on: the `fixture` target runs fully offline (the hourly
+  # fixture assertion), and the lake target is pointed at MinIO by the driver
+  # script, which brings it up first.
+  dbt:
+    <<: *spark-job
+    build:
+      context: .
+      dockerfile: docker/spark.Dockerfile
+      args:
+        INSTALL_DBT: "true"
+    image: factorypulse/spark:3.5-dbt
+    environment:
+      <<: *spark-env
+      DBT_PROFILES_DIR: /opt/dbt
+      DBT_ARGS: "build --target lake"
+    volumes:
+      - ./spark:/opt/app
+      - ./src:/opt/src
+      - ./dbt:/opt/dbt
+      - ./scripts/dbt-entrypoint.sh:/opt/dbt-entrypoint.sh:ro
+    # `bash <script>` rather than executing it directly: the bind-mounted file
+    # carries the host's permissions, and the container does not need the +x bit.
+    command: ["exec bash /opt/dbt-entrypoint.sh $$DBT_ARGS"]
+    profiles: ["lake-jobs"]
+    restart: "no"
+
+  # One-shot query: Spark SQL read of the dbt marts, the same way the raw lake
+  # is read. Run with: docker compose run --rm query-analytics
+  query-analytics:
+    <<: *spark-job
+    command: ["exec /opt/spark/bin/spark-submit --master local[*] --packages \"$$SPARK_JAR_PACKAGES\" /opt/app/query_analytics.py"]
+    depends_on:
+      minio: { condition: service_healthy }
+    profiles: ["lake-jobs"]
+    restart: "no"
+
+  # ================= Phase 7 anomaly detection (ticket 08) =================
+  # Scores the hourly mart's temperature and vibration against each machine's
+  # trailing baseline and merges the result into mrt_anomaly_scores. One-shot:
+  #   docker compose run --rm anomaly-detection
+  # ANOMALY_ARGS goes to the job; `--lake-root <dir>` scores a fixture lake.
+  anomaly-detection:
+    <<: *spark-job
+    environment:
+      <<: *spark-env
+      ANOMALY_ARGS: ""
+    command: ["exec /opt/spark/bin/spark-submit --master local[*] --packages \"$$SPARK_JAR_PACKAGES\" /opt/app/anomaly_detection.py $$ANOMALY_ARGS"]
+    depends_on:
+      minio: { condition: service_healthy }
+    profiles: ["lake-jobs"]
+    restart: "no"
+
+  # ================= Phase 6 data quality (ticket 07) =================
+  # Great Expectations checks over the lake's Delta tables, read with deltalake
+  # (no Spark). One-shot; prints a report naming every failed check and exits
+  # non-zero if any failed. Driven by scripts/quality.sh:
+  #   docker compose run --rm quality --stage ingestion   the raw lake
+  #   docker compose run --rm quality --stage post-dbt    the dbt models
+  quality:
+    build:
+      context: .
+      dockerfile: docker/quality.Dockerfile
+    image: factorypulse/quality
+    environment:
+      MINIO_ENDPOINT: minio:9000
+      MINIO_SECURE: "false"
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-}
+      MINIO_BUCKET: factorypulse
+    volumes:
+      - ./src:/opt/src:ro
+    depends_on:
+      minio: { condition: service_healthy }
+    profiles: ["lake-jobs"]
+    restart: "no"
+
+  # ================= Phase 8 dashboard (ticket 09) =================
+  # Streamlit over the lake's Delta tables, read with deltalake (no Spark):
+  # machine-health KPIs, temperature and vibration trends, at-risk machines.
+  #   docker compose up -d streamlit       then open http://localhost:8501
+  # A table not built yet shows as an error naming it: run the lake jobs first.
+  streamlit:
+    build:
+      context: .
+      dockerfile: docker/dashboard.Dockerfile
+    image: factorypulse/dashboard
+    environment:
+      MINIO_ENDPOINT: minio:9000
+      MINIO_SECURE: "false"
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-}
+      MINIO_BUCKET: factorypulse
+    volumes:
+      - ./src:/opt/src:ro
+    ports:
+      - "127.0.0.1:8501:8501"
+    depends_on:
+      minio: { condition: service_healthy }
+    restart: unless-stopped
+
+  # ================= Phase 5 orchestration (ticket 06) =================
+  # Airflow schedules the drivers: dags/factorypulse_dag.py holds a daily DAG
+  # (batch ingest, raw checks, dbt, model checks) and a weekly DAG (weekly
+  # mart, its checks). Failed tasks show in the UI and retry; clear one to
+  # rerun it by hand.
+
+  # One-shot: create or upgrade the SQLite metadata database.
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: ["/bin/bash", "-c"]
+    command: ["airflow db migrate"]
+    restart: "no"
+
+  # The UI and the API the tasks report to (Airflow 3's api-server).
+  airflow-webserver:
+    <<: *airflow-common
+    command: api-server
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      airflow-init: { condition: service_completed_successfully }
+    restart: unless-stopped
+
+  # Schedules the DAGs and, through the LocalExecutor, runs their tasks. The
+  # tasks drive the host daemon through its socket, from the repository root.
+  # A stop does not reach the tasks (the LocalExecutor waits for them), so
+  # scripts/scheduler.sh runs the scheduler and, on SIGTERM, stops new jobs
+  # from starting and removes the job containers its tasks started until the
+  # scheduler has exited. The grace period leaves the failed tasks
+  # time to report before SIGKILL. The mount's fallback only keeps this file
+  # valid without .env.
+  airflow-scheduler:
+    <<: *airflow-common
+    command: ["bash", "${FACTORYPULSE_HOST_DIR:-/opt/factorypulse}/scripts/scheduler.sh"]
+    stop_grace_period: 1m
+    volumes:
+      - airflow-data:/opt/airflow
+      - ./dags:/opt/airflow/dags:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - .:${FACTORYPULSE_HOST_DIR:-/opt/factorypulse}
+    depends_on:
+      airflow-init: { condition: service_completed_successfully }
+    restart: unless-stopped
+
+  # Parses the DAG files (a separate process since Airflow 3).
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+    depends_on:
+      airflow-init: { condition: service_completed_successfully }
+    restart: unless-stopped
+
+volumes:
+  minio-data:
+  airflow-data:

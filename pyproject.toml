@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "factorypulse"
+version = "1.0.0"
+description = "FactoryPulse — IoT predictive maintenance pipeline (local-first, $0). Shared Python components."
+requires-python = ">=3.11"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Host tests import the `spark` package from the repo root (it is not a pip
+# package); put the root on sys.path so that import resolves in pytest.
+pythonpath = ["."]

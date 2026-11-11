@@ -1,0 +1,85 @@
+# FactoryPulse dbt project (ticket 05): the analytics layer over the raw Delta
+# lake.
+#
+# Every model is plain SQL and writes a Delta table to an explicit lake
+# location, so downstream stages read the marts exactly like the raw lake —
+# `spark.read.format("delta").load(path)` or `delta.`<path>`` in SQL. The
+# names and locations live in factorypulse/analytics.py; the host test
+# tests/test_dbt_project.py locks the two views together.
+name: factorypulse
+version: "1.0.0"
+config-version: 2
+profile: factorypulse
+
+model-paths: ["models"]
+seed-paths: ["seeds"]
+test-paths: ["tests"]
+macro-paths: ["macros"]
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+
+models:
+  factorypulse:
+    +materialized: table
+    +file_format: delta
+    # dbt-spark never creates the target schema, and Delta refuses
+    # `CREATE OR REPLACE TABLE ... LOCATION` while the database is unknown: it
+    # compares the explicit path against the warehouse default and dies with
+    # DELTA_TABLE_LOCATION_MISMATCH. Create the schema first, then every model
+    # pins its own lake location through location_root. Deliberately no LOCATION
+    # on the schema itself: managed tables stay in the container's local
+    # warehouse, so a lake run cannot litter the lake with fixture seeds.
+    +pre-hook: "create database if not exists {{ target.schema }}"
+
+# Fixture seeds (the offline run: `scripts/dbt.sh fixture`). Column types are
+# pinned so a run never depends on seed type inference.
+seeds:
+  factorypulse:
+    raw_sensor_events_fixture:
+      +column_types:
+        event_id: string
+        ts: string
+        site_id: string
+        machine_id: string
+        sensor_type: string
+        value: double
+        unit: string
+        status: string
+    expected_mrt_machine_hourly:
+      +column_types:
+        machine_hour_key: string
+        machine_id: string
+        site_id: string
+        hour_start: string
+        reading_count: bigint
+        nominal_count: bigint
+        warning_count: bigint
+        critical_count: bigint
+        temperature_avg: double
+        temperature_max: double
+        vibration_avg: double
+        vibration_max: double
+        pressure_avg: double
+        pressure_max: double
+        humidity_avg: double
+        humidity_max: double
+    expected_mrt_machine_weekly:
+      +column_types:
+        machine_week_key: string
+        machine_id: string
+        site_id: string
+        iso_year: int
+        iso_week: int
+        week_start: string
+        reading_count: bigint
+        nominal_count: bigint
+        warning_count: bigint
+        critical_count: bigint
+        temperature_avg: double
+        temperature_max: double
+        vibration_avg: double
+        vibration_max: double
+        pressure_avg: double
+        pressure_max: double
+        humidity_avg: double
+        humidity_max: double

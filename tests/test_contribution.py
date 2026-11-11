@@ -1,0 +1,428 @@
+"""Lock the inbound contribution channel (repo-release ticket 02).
+
+An outside contributor reaches the project through the public repository:
+issue templates, a pull request template, a contributing guide, and labels
+that match the triage vocabulary. An accepted pull request is imported into
+`dev` by `scripts/import-contribution.sh`, which credits its authors in the
+commit and in the changelog. The release that publishes that changelog entry
+closes the pull request (`tests/test_release.py`).
+
+A stub `gh` on `PATH` stands in for GitHub, so the import tests touch no
+network. The checks against the live public repository run with
+
+    FACTORYPULSE_GITHUB_TESTS=1 python -m pytest tests/test_contribution.py
+"""
+
+import json
+import os
+import re
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from test_release import BASH, IDENTITY, VALID_TREE, _commit, _git, _release, _write, repos  # noqa: F401
+
+ROOT = Path(__file__).resolve().parent.parent
+SCRIPT = ROOT / "scripts" / "import-contribution.sh"
+GITHUB = ROOT / ".github"
+TEMPLATES = GITHUB / "ISSUE_TEMPLATE"
+PUBLIC = "AbderrahmenElloumi/FactoryPulse"
+PR_URL = "https://github.com/owner/repo/pull/7"
+
+# A `gh` stand-in. `--json <field>` prints the file named after the field,
+# `pr diff` prints `diff`, and every call is logged to `calls`. A missing
+# file fails the call, as an unreachable GitHub would.
+FAKE_GH = """#!/usr/bin/env bash
+echo "$*" >> "$FAKE_GH_DIR/calls"
+if [[ "$1 $2" == "pr diff" ]]; then exec cat "$FAKE_GH_DIR/diff"; fi
+if [[ "$1 $2" == "pr close" ]]; then [[ ! -e "$FAKE_GH_DIR/close-fails" ]]; exit; fi
+while [[ $# -gt 0 ]]; do
+  if [[ "$1" == --json ]]; then exec cat "$FAKE_GH_DIR/$2"; fi
+  shift
+done
+exit 1
+"""
+
+CHANGELOG = (
+    "# Changelog\n\n## Unreleased\n\n### Added\n\n- Something.\n\n"
+    "## [0.1.0] - 2026-11-11\n\n### Added\n\n- First release.\n"
+)
+
+DIFF = """diff --git a/src/core.py b/src/core.py
+index 0000000..1111111 100644
+--- a/src/core.py
++++ b/src/core.py
+@@ -1 +1 @@
+-VALUE = 1
++VALUE = 2
+"""
+
+PULL_REQUEST = {
+    "state": "OPEN\n",
+    "title": "Fix the value\n",
+    "commits": "Ann Example <ann@example.com>\nBo Example <bo@example.com>\n"
+    "Ann Example <ann@example.com>\n",
+    "diff": DIFF,
+}
+
+
+def _vocabulary():
+    """Every label string in the triage vocabulary document."""
+    text = (ROOT / "docs" / "agents" / "triage-labels.md").read_text(encoding="utf-8")
+    roles = re.findall(r"^\| `[^`]+` +\| `([^`]+)` +\|", text, re.MULTILINE)
+    lifecycle = re.findall(r"^\| `([^`]+)` +\| [A-Z]", text, re.MULTILINE)
+    return set(roles) | set(lifecycle)
+
+
+def _front_matter(path):
+    text = path.read_text(encoding="utf-8")
+    match = re.match(r"---\n(.*?)\n---\n", text, re.DOTALL)
+    assert match, f"{path.name} has no front matter"
+    return dict(re.findall(r"^(\w+):\s*(.*)$", match.group(1), re.MULTILINE))
+
+
+# ---- Repository files ------------------------------------------------------
+
+
+def test_vocabulary_holds_the_five_triage_roles_and_closed():
+    assert _vocabulary() == {
+        "needs-triage",
+        "needs-info",
+        "ready-for-agent",
+        "ready-for-human",
+        "wontfix",
+        "closed",
+    }
+
+
+def test_issue_templates_use_names_and_front_matter_github_recognises():
+    templates = sorted(p.name for p in TEMPLATES.iterdir())
+    assert templates, "no issue template"
+    for name in templates:
+        assert name.endswith(".md"), name
+        front = _front_matter(TEMPLATES / name)
+        assert front.get("name") and front.get("about"), name
+
+
+def test_issue_templates_apply_only_vocabulary_labels():
+    for path in TEMPLATES.glob("*.md"):
+        labels = _front_matter(path).get("labels", "")
+        applied = {label.strip().strip("'\"") for label in labels.split(",")} - {""}
+        assert applied, path.name
+        assert applied <= _vocabulary(), path.name
+
+
+def test_contributing_guide_explains_the_path_of_a_pull_request():
+    guide = (GITHUB / "CONTRIBUTING.md").read_text(encoding="utf-8")
+    # How to open one, what happens once accepted, which release carries it.
+    assert "Open a pull request against `main`" in guide
+    assert "co-author" in guide
+    assert "`### Contributed`" in guide
+    assert "closed with a comment naming the release" in guide
+
+
+# ---- Importing a pull request ----------------------------------------------
+
+needs_bash = pytest.mark.skipif(
+    BASH is None or shutil.which("git") is None, reason="needs git and bash"
+)
+
+
+@pytest.fixture
+def dev(tmp_path):
+    """A development repository on `dev`, a `public` GitHub remote, a stub gh."""
+    work = tmp_path / "work"
+    _git(tmp_path, "init", "-q", "-b", "dev", str(work))
+    _git(work, "config", "core.autocrlf", "false")
+    _write(work, {"CHANGELOG.md": CHANGELOG, "src/core.py": "VALUE = 1\n"})
+    _git(work, "add", "-A")
+    _git(work, "commit", "-q", "-m", "first")
+    _git(work, "remote", "add", "public", "https://github.com/owner/repo.git")
+
+    stub = tmp_path / "stub"
+    _write(stub, {"bin/gh": FAKE_GH, **PULL_REQUEST})
+    return work, stub
+
+
+def _import(work, stub, *args):
+    path = os.pathsep.join([str(stub / "bin"), os.environ["PATH"]])
+    return subprocess.run(
+        [BASH, str(SCRIPT), *args],
+        cwd=work,
+        env={**os.environ, **IDENTITY, "PATH": path, "FAKE_GH_DIR": str(stub)},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+
+def _state(work):
+    """Everything a refused import must leave unchanged."""
+    return (
+        _git(work, "for-each-ref", "--format=%(refname) %(objectname)").stdout,
+        _git(work, "status", "--porcelain").stdout,
+        (work / "CHANGELOG.md").read_bytes(),
+        (work / "src" / "core.py").read_bytes(),
+    )
+
+
+@needs_bash
+def test_import_commits_the_pull_request_with_its_authors_as_co_authors(dev):
+    work, stub = dev
+    head = _git(work, "rev-parse", "HEAD").stdout.strip()
+
+    result = _import(work, stub, "7")
+
+    assert result.returncode == 0, result.stderr
+    assert _git(work, "rev-list", "--parents", "-n", "1", "HEAD").stdout.split()[1:] == [head]
+    assert _git(work, "status", "--porcelain").stdout == ""
+    assert (work / "src" / "core.py").read_text(encoding="utf-8") == "VALUE = 2\n"
+    message = _git(work, "log", "-1", "--format=%B").stdout
+    assert message.startswith("Import public pull request #7: Fix the value\n")
+    assert PR_URL in message
+    trailers = re.findall(r"^Co-authored-by: .*$", message, re.MULTILINE)
+    assert trailers == [
+        "Co-authored-by: Ann Example <ann@example.com>",
+        "Co-authored-by: Bo Example <bo@example.com>",
+    ]
+
+
+@needs_bash
+def test_import_credits_the_authors_by_name_under_unreleased(dev):
+    work, stub = dev
+
+    assert _import(work, stub, "7").returncode == 0
+
+    changelog = (work / "CHANGELOG.md").read_text(encoding="utf-8")
+    entry = f"- Fix the value ([#7]({PR_URL})), contributed by Ann Example, Bo Example."
+    assert changelog.startswith(
+        f"# Changelog\n\n## Unreleased\n\n### Contributed\n\n{entry}\n\n### Added\n"
+    )
+
+
+@needs_bash
+def test_a_second_import_joins_the_existing_contributed_section(dev):
+    work, stub = dev
+    assert _import(work, stub, "7").returncode == 0
+    _write(stub, {"title": "Second fix\n", "commits": "Cy Example <cy@example.com>\n"})
+    _write(stub, {"diff": DIFF.replace("VALUE = 1", "VALUE = 2").replace("+VALUE = 2", "+VALUE = 3")})
+
+    assert _import(work, stub, "8").returncode == 0
+
+    changelog = (work / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert changelog.count("### Contributed") == 1
+    assert "contributed by Cy Example.\n- Fix the value" in changelog
+
+
+def _wrong_branch(work, stub):
+    _git(work, "checkout", "-q", "-b", "main")
+
+
+def _dirty(work, stub):
+    _write(work, {"src/core.py": "VALUE = 9\n"})
+
+
+def _no_public_remote(work, stub):
+    _git(work, "remote", "remove", "public")
+
+
+def _public_not_on_github(work, stub):
+    _git(work, "remote", "set-url", "public", "https://example.com/owner/repo.git")
+
+
+def _no_unreleased_heading(work, stub):
+    _write(work, {"CHANGELOG.md": CHANGELOG.replace("## Unreleased", "## Next")})
+    _git(work, "commit", "-q", "-am", "no unreleased")
+
+
+def _unreadable(work, stub):
+    (stub / "state").unlink()
+
+
+def _closed(work, stub):
+    _write(stub, {"state": "CLOSED\n"})
+
+
+def _no_author(work, stub):
+    _write(stub, {"commits": ""})
+
+
+def _does_not_apply(work, stub):
+    _write(work, {"src/core.py": "VALUE = 5\n"})
+    _git(work, "commit", "-q", "-am", "diverged")
+
+
+REFUSALS = {
+    "not on dev": _wrong_branch,
+    "dirty working tree": _dirty,
+    "no remote named public": _no_public_remote,
+    "public is not a GitHub repository": _public_not_on_github,
+    "no Unreleased heading in CHANGELOG.md": _no_unreleased_heading,
+    f"cannot read {PR_URL}": _unreadable,
+    "pull request #7 is CLOSED": _closed,
+    "pull request #7 has no commit author": _no_author,
+    "pull request #7 does not apply to dev": _does_not_apply,
+}
+
+
+@needs_bash
+@pytest.mark.parametrize("reason", REFUSALS)
+def test_import_refuses_a_broken_state_with_a_named_reason_and_no_side_effects(dev, reason):
+    work, stub = dev
+    REFUSALS[reason](work, stub)
+    before = _state(work)
+
+    result = _import(work, stub, "7")
+
+    assert result.returncode == 1, result.stdout
+    assert f"import refused: {reason}" in result.stderr
+    assert _state(work) == before
+
+
+@needs_bash
+@pytest.mark.parametrize("args", [[], ["0"], ["#7"], ["7", "8"]])
+def test_import_refuses_a_missing_or_malformed_pull_request_number(dev, args):
+    work, stub = dev
+    before = _state(work)
+
+    result = _import(work, stub, *args)
+
+    assert result.returncode == 2
+    assert "usage: scripts/import-contribution.sh <pr-number>" in result.stderr
+    assert _state(work) == before
+
+
+# ---- Closing at release ----------------------------------------------------
+
+RELEASE_CHANGELOG = """# Changelog
+
+## [0.1.0] - 2026-11-11
+
+### Contributed
+
+- Fix the value ([#7](https://github.com/owner/repo/pull/7)), contributed by Ann Example.
+- Fix the name ([#8](https://github.com/owner/repo/pull/8)), contributed by Bo Example.
+
+### Added
+
+- Support for the idea in [#9](https://github.com/owner/repo/pull/9).
+"""
+
+
+@pytest.fixture
+def credited(repos, tmp_path):
+    """A releasable `main` whose changelog entry credits pull requests 7 and 8."""
+    work, public = repos
+    _write(work, {"CHANGELOG.md": RELEASE_CHANGELOG})
+    _commit(work, "credit")
+    stub = tmp_path / "stub"
+    _write(stub, {"bin/gh": FAKE_GH})
+    env = {
+        "PATH": os.pathsep.join([str(stub / "bin"), os.environ["PATH"]]),
+        "FAKE_GH_DIR": str(stub),
+    }
+    return work, public, stub, env
+
+
+def _calls(stub):
+    calls = stub / "calls"
+    return calls.read_text(encoding="utf-8").splitlines() if calls.exists() else []
+
+
+@needs_bash
+def test_publishing_closes_each_pull_request_the_release_credits_naming_its_tag(credited):
+    work, public, stub, env = credited
+
+    result = _release(work, "0.1.0", **env)
+
+    assert result.returncode == 0, result.stderr
+    comment = (
+        "--comment Released in v0.1.0 (https://github.com/owner/repo/tree/v0.1.0), "
+        "imported into the development line and credited in its changelog entry."
+    )
+    assert _calls(stub) == [
+        f"pr close https://github.com/owner/repo/pull/7 {comment}",
+        f"pr close https://github.com/owner/repo/pull/8 {comment}",
+    ]
+
+
+@needs_bash
+def test_dry_run_reports_the_pull_requests_it_would_close_and_closes_none(credited):
+    work, public, stub, env = credited
+
+    result = _release(work, "--dry-run", "0.1.0", **env)
+
+    assert result.returncode == 0, result.stderr
+    assert "would close: https://github.com/owner/repo/pull/7" in result.stdout
+    assert "would close: https://github.com/owner/repo/pull/8" in result.stdout
+    assert _calls(stub) == []
+
+
+@needs_bash
+def test_a_pull_request_that_fails_to_close_is_named_after_publishing(credited):
+    work, public, stub, env = credited
+    (stub / "close-fails").write_text("", encoding="utf-8")
+
+    result = _release(work, "0.1.0", **env)
+
+    assert result.returncode == 1
+    assert "published v0.1.0 to public" in result.stdout
+    assert "could not close: https://github.com/owner/repo/pull/7" in result.stderr
+    assert "could not close: https://github.com/owner/repo/pull/8" in result.stderr
+    assert _git(public, "tag", "--list").stdout.split() == ["v0.1.0"]
+
+
+# ---- The live public repository --------------------------------------------
+
+needs_github = pytest.mark.skipif(
+    os.environ.get("FACTORYPULSE_GITHUB_TESTS") != "1" or shutil.which("gh") is None,
+    reason="needs gh logged in to GitHub; set FACTORYPULSE_GITHUB_TESTS=1",
+)
+
+
+def _gh_json(*args):
+    result = subprocess.run(
+        ["gh", *args], capture_output=True, text=True, encoding="utf-8", check=True, timeout=60
+    )
+    return json.loads(result.stdout)
+
+
+@needs_github
+def test_public_repository_carries_every_triage_label():
+    labels = _gh_json("label", "list", "-R", PUBLIC, "--limit", "200", "--json", "name")
+    assert _vocabulary() <= {label["name"] for label in labels}
+
+
+@needs_github
+def test_github_detects_the_templates_and_guide_on_the_public_repository():
+    files = _gh_json("api", f"repos/{PUBLIC}/community/profile")["files"]
+    assert files["pull_request_template"], "pull request template not detected"
+    assert files["contributing"], "contributing guide not detected"
+    listed = _gh_json("api", f"repos/{PUBLIC}/contents/.github/ISSUE_TEMPLATE")
+    assert sorted(f["name"] for f in listed) == sorted(p.name for p in TEMPLATES.iterdir())
+
+
+@needs_github
+def test_every_ticket_from_an_inbound_issue_is_referenced_back_by_that_issue():
+    tickets = list(ROOT.glob(".scratch/*/issues/*.md")) + list(
+        ROOT.glob(".scratch/*/closed/*/ticket.md")
+    )
+    linked = []
+    for ticket in tickets:
+        match = re.search(
+            rf"^GitHub: https://github\.com/{PUBLIC}/issues/(\d+)$",
+            ticket.read_text(encoding="utf-8"),
+            re.MULTILINE,
+        )
+        if match:
+            linked.append((ticket, match.group(1)))
+    assert linked, "no ticket records an inbound issue"
+    for ticket, number in linked:
+        issue = _gh_json("issue", "view", number, "-R", PUBLIC, "--json", "comments")
+        # The ticket moves to closed/<NN>-<slug>/ when closed; the slug stays.
+        feature = ticket.relative_to(ROOT).parts[1]
+        slug = ticket.stem if ticket.parent.name == "issues" else ticket.parent.name
+        named = [c for c in issue["comments"] if f".scratch/{feature}/" in c["body"] and slug in c["body"]]
+        assert named, f"issue #{number} does not name {ticket.relative_to(ROOT)}"

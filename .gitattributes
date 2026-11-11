@@ -1,0 +1,9 @@
+# Line endings that matter to the runtime, not to the editor.
+#
+# Shell scripts are executed inside Linux containers (scripts/dbt-entrypoint.sh
+# is), and a CRLF checkout breaks them — including the heredoc terminator.
+# Dockerfiles are worse: CRLF silently breaks a `RUN ... \` line continuation.
+# Authoring happens on Windows, so pin these to LF in the repository.
+*.sh text eol=lf
+Dockerfile text eol=lf
+*.Dockerfile text eol=lf

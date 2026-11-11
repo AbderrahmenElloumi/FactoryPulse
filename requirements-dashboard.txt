@@ -1,0 +1,7 @@
+# Dashboard image (ticket 09): Streamlit and Plotly over the Delta tables,
+# read through factorypulse.lake. pandas arrives with streamlit.
+streamlit==1.65.0
+plotly==7.1.0
+deltalake==1.6.6
+# deltalake 1.x does not depend on pyarrow, but DeltaTable.to_pandas needs it.
+pyarrow==25.0.1

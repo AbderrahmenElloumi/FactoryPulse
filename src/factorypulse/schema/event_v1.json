@@ -1,0 +1,73 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://factorypulse.dev/schemas/sensor-event/v1.json",
+  "title": "SensorEventV1",
+  "description": "The FactoryPulse sensor-event contract (spec.md). Mirror of src/factorypulse/contract.py — a test keeps the two in sync.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "event_id",
+    "ts",
+    "site_id",
+    "machine_id",
+    "sensor_type",
+    "value",
+    "unit",
+    "status"
+  ],
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "ts": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}(Z|[+-]00:00)$",
+      "description": "ISO-8601 UTC, millisecond precision (YYYY-MM-DDTHH:MM:SS.mmmZ). Shape-level check only (JSON Schema has no calendar validation); factorypulse.validator additionally checks the timestamp is a real calendar date."
+    },
+    "site_id": { "type": "string", "minLength": 1 },
+    "machine_id": { "type": "string", "minLength": 1 },
+    "sensor_type": { "enum": ["temperature", "vibration", "pressure", "humidity"] },
+    "value": { "type": ["number", "integer"] },
+    "unit": { "type": "string" },
+    "status": { "enum": ["nominal", "warning", "critical"] }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "sensor_type": { "const": "temperature" } } },
+      "then": {
+        "properties": {
+          "unit": { "const": "celsius" },
+          "value": { "minimum": -40.0, "maximum": 150.0 }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "sensor_type": { "const": "vibration" } } },
+      "then": {
+        "properties": {
+          "unit": { "const": "g_pp" },
+          "value": { "minimum": 0.0, "maximum": 20.0 }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "sensor_type": { "const": "pressure" } } },
+      "then": {
+        "properties": {
+          "unit": { "const": "psi" },
+          "value": { "minimum": 0.0, "maximum": 200.0 }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "sensor_type": { "const": "humidity" } } },
+      "then": {
+        "properties": {
+          "unit": { "const": "percent" },
+          "value": { "minimum": 0.0, "maximum": 100.0 }
+        }
+      }
+    }
+  ]
+}

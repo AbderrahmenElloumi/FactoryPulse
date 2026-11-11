@@ -1,0 +1,172 @@
+version: 2
+
+models:
+  - name: dim_machine
+    description: >
+      One row per machine observed in the lake, with the site it reports from,
+      its observed window and how much it reports.
+    columns:
+      - name: machine_id
+        description: Business key, carried on every event.
+        data_tests:
+          - unique
+          - not_null
+      - name: site_id
+        description: Site the machine reports from.
+        data_tests:
+          - not_null
+      - name: first_seen_at
+        description: Timestamp of the machine's earliest reading.
+        data_tests:
+          - not_null
+      - name: last_seen_at
+        description: Timestamp of the machine's latest reading.
+        data_tests:
+          - not_null
+      - name: reading_count
+        description: Number of cleaned readings for the machine.
+        data_tests:
+          - not_null
+      - name: sensor_type_count
+        description: How many distinct sensor types the machine reports.
+        data_tests:
+          - not_null
+
+  - name: fct_sensor_readings_clean
+    description: >
+      Cleaned sensor readings: one row per event, deduplicated and typed.
+    columns:
+      - name: event_id
+        description: Event contract key; unique after deduplication.
+        data_tests:
+          - unique
+          - not_null
+      - name: event_ts
+        description: Event timestamp as a real timestamp (UTC).
+        data_tests:
+          - not_null
+      - name: site_id
+        description: Site the reading came from.
+        data_tests:
+          - not_null
+      - name: machine_id
+        description: Machine the reading came from.
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('dim_machine')
+              field: machine_id
+      - name: sensor_type
+        description: Sensor that produced the reading.
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: [temperature, vibration, pressure, humidity]
+      - name: value
+        description: Reading value, in the unit its sensor reports.
+        data_tests:
+          - not_null
+      - name: unit
+        description: Unit of the reading; fixed per sensor type by the contract.
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: [celsius, g_pp, percent, psi]
+      - name: status
+        description: Simulator-reported health status of the reading.
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: [nominal, warning, critical]
+
+  - name: mrt_machine_hourly
+    description: >
+      Hourly per-machine aggregate: counts by status and per-sensor statistics
+      for each (machine_id, UTC hour).
+    columns:
+      - name: machine_hour_key
+        description: Surrogate key, machine_id + UTC hour.
+        data_tests:
+          - unique
+          - not_null
+      - name: machine_id
+        description: Machine the hour belongs to.
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('dim_machine')
+              field: machine_id
+      - name: site_id
+        description: Site the machine reports from.
+        data_tests:
+          - not_null
+      - name: hour_start
+        description: Start of the UTC hour the readings fall into.
+        data_tests:
+          - not_null
+      - name: reading_count
+        description: Cleaned readings in the hour.
+        data_tests:
+          - not_null
+      - name: nominal_count
+        description: Readings in the hour with nominal status.
+        data_tests:
+          - not_null
+      - name: warning_count
+        description: Readings in the hour with warning status.
+        data_tests:
+          - not_null
+      - name: critical_count
+        description: Readings in the hour with critical status.
+        data_tests:
+          - not_null
+
+  - name: mrt_machine_weekly
+    description: >
+      Weekly per-machine rollup of the hourly mart: one row per machine per
+      ISO week, with the ISO year/week labels and the week's Monday start.
+    columns:
+      - name: machine_week_key
+        description: Surrogate key, machine_id + ISO week start date.
+        data_tests:
+          - unique
+          - not_null
+      - name: machine_id
+        description: Machine the week belongs to.
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('dim_machine')
+              field: machine_id
+      - name: site_id
+        description: Site the machine reports from.
+        data_tests:
+          - not_null
+      - name: iso_year
+        description: ISO-8601 week year (may differ from the calendar year).
+        data_tests:
+          - not_null
+      - name: iso_week
+        description: ISO-8601 week number within iso_year.
+        data_tests:
+          - not_null
+      - name: week_start
+        description: Monday 00:00 UTC that starts the ISO week.
+        data_tests:
+          - not_null
+      - name: reading_count
+        description: Cleaned readings in the week.
+        data_tests:
+          - not_null
+      - name: nominal_count
+        description: Readings in the week with nominal status.
+        data_tests:
+          - not_null
+      - name: warning_count
+        description: Readings in the week with warning status.
+        data_tests:
+          - not_null
+      - name: critical_count
+        description: Readings in the week with critical status.
+        data_tests:
+          - not_null

@@ -1,0 +1,4 @@
+machine_week_key,machine_id,site_id,iso_year,iso_week,week_start,reading_count,nominal_count,warning_count,critical_count,temperature_avg,temperature_max,vibration_avg,vibration_max,pressure_avg,pressure_max,humidity_avg,humidity_max
+site-a-machine-01@2026-02-23,site-a-machine-01,site-a,2026,9,2026-02-23 00:00:00,6,4,1,1,75.0,80.0,1.6,3.0,,,,
+site-a-machine-02@2026-02-23,site-a-machine-02,site-a,2026,9,2026-02-23 00:00:00,4,3,0,1,,,,,110.0,130.0,57.5,60.0
+site-b-machine-01@2026-02-23,site-b-machine-01,site-b,2026,9,2026-02-23 00:00:00,1,1,0,0,65.0,65.0,,,,,,
