@@ -25,6 +25,9 @@ ROOT = Path(__file__).resolve().parent.parent
 README = ROOT / "README.md"
 GUIDE = ROOT / "docs" / "architecture-guide.md"
 DOCS = [README, GUIDE]
+PUBLIC_REPOSITORY = "https://github.com/AbderrahmenElloumi/FactoryPulse"
+# The public clone's directory name: the name an example path may use.
+PUBLIC_CLONE = "FactoryPulse"
 
 # Compose settings that carry a credential, and the variable each reads.
 CREDENTIAL_SETTINGS = {
@@ -88,6 +91,29 @@ def test_readme_points_at_the_release_process():
     # The repository goes public through a separate release repository,
     # not by flipping this one's visibility.
     assert "`.scratch/repo-release/spec.md`" in _read(README)
+
+
+def _repository_section() -> str:
+    match = re.search(r"^## Repository$(.*?)(?=^## |\Z)", _read(README), re.MULTILINE | re.DOTALL)
+    assert match, "the README has no Repository section"
+    return match.group(1)
+
+
+def test_readme_repository_section_speaks_from_the_public_side():
+    # The release tree is the promoted branch's tree, so one README text is
+    # read in both repositories. It must stay true in the public one.
+    section = " ".join(_repository_section().split())
+    assert PUBLIC_REPOSITORY in section
+    assert "Development happens in a private repository" in section
+    calls_itself_private = r"\bthis\s+(?:[\w-]+\s+)?repository\s+is\s+private\b"
+    assert not re.search(calls_itself_private, _read(README), re.IGNORECASE)
+
+
+def test_readme_says_the_scratch_records_cite_unpublished_workflow_rules():
+    section = " ".join(_repository_section().split())
+    assert "`.scratch/`" in section
+    assert "role rules of the agent workflow" in section
+    assert "not published" in section
 
 
 # ---- Documentation honesty -------------------------------------------------
@@ -164,6 +190,16 @@ def test_env_example_gives_every_credential_a_value():
     example = _env_example()
     for variable in set(CREDENTIAL_SETTINGS.values()):
         assert example.get(variable), variable
+
+
+def test_env_example_carries_no_internal_ticket_or_directory_name():
+    # A public reader copies this file: it must not cite the private
+    # tracker, nor name the private checkout's directory in an example path.
+    text = _read(ROOT / ".env.example")
+    assert not re.search(r"\bticket\b", text, re.IGNORECASE)
+    clones = re.findall(r"/(?:home|Users)/me/([^\s/]+)", text)
+    assert clones, ".env.example gives no example repository path"
+    assert set(clones) == {PUBLIC_CLONE}
 
 
 needs_docker = pytest.mark.skipif(

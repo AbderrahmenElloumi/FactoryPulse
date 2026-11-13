@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+## [1.0.2] - 2026-11-13
+
+### Changed
+
+- The contribution import refuses a pull request that edits `CHANGELOG.md`:
+  the import writes the contributor's entry itself.
+- The contribution import takes the contribution ticket's path, and its
+  commit message names that ticket.
+- The README, the contributing guide and `.env.example` describe the public
+  repository: its address, how an inbound issue or pull request is handled,
+  and `FactoryPulse` as the checkout directory in the examples.
+
+### Security
+
+- The release refuses a credential embedded in `compose.yaml` in any form
+  compose reads, including an interpolation default such as
+  `${VAR:-secret}` ([#1](https://github.com/AbderrahmenElloumi/FactoryPulse/issues/1)).
+
 ## [1.0.1] - 2026-11-11
 
 ### Contributed

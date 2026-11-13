@@ -10,6 +10,7 @@ the real suite would run this file again.
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -61,8 +62,11 @@ def _bash():
 
 
 BASH = _bash()
+# The credential guard reads compose.yaml through `docker compose config`, which
+# needs the docker CLI and its compose plugin, not a running daemon.
 pytestmark = pytest.mark.skipif(
-    BASH is None or shutil.which("git") is None, reason="needs git and bash"
+    BASH is None or shutil.which("git") is None or shutil.which("docker") is None,
+    reason="needs git, bash and the docker CLI",
 )
 
 
@@ -97,7 +101,13 @@ def _release(repo, *args, **env):
     return subprocess.run(
         [BASH, str(SCRIPT), *args],
         cwd=repo,
-        env={**os.environ, **IDENTITY, "RELEASE_TEST_CMD": "true", **env},
+        env={
+            **os.environ,
+            **IDENTITY,
+            "RELEASE_TEST_CMD": "true",
+            "RELEASE_PYTHON": sys.executable,
+            **env,
+        },
         capture_output=True,
         text=True,
         timeout=120,
@@ -243,16 +253,15 @@ def _changelog_without_heading(work):
 
 
 def _embedded_credential(work):
-    _write(work, {"compose.yaml": VALID_TREE["compose.yaml"] + "      MINIO_ROOT_USER: admin\n"})
-    _commit(work, "embed credential")
+    _compose(work, "      MINIO_ROOT_USER: admin\n")
 
 
 def _undeclared_variable(work):
-    _write(
-        work,
-        {"compose.yaml": VALID_TREE["compose.yaml"] + "      JWT: ${AIRFLOW_JWT_SECRET:-}\n"},
-    )
-    _commit(work, "interpolate undeclared variable")
+    _compose(work, "      JWT: ${AIRFLOW_JWT_SECRET:-}\n")
+
+
+def _unreadable_compose(work):
+    _compose(work, "services: {\n")
 
 
 def _no_public_remote(work):
@@ -271,6 +280,12 @@ REFUSALS = {
     "no changelog heading for 0.2.0": (_changelog_without_heading, "0.2.0", {}),
     "credential embedded in compose.yaml: MINIO_ROOT_USER": (_embedded_credential, "0.1.0", {}),
     ".env.example does not declare: AIRFLOW_JWT_SECRET": (_undeclared_variable, "0.1.0", {}),
+    "docker compose cannot read compose.yaml": (_unreadable_compose, "0.1.0", {}),
+    "cannot scan compose.yaml with missing-python": (
+        None,
+        "0.1.0",
+        {"RELEASE_PYTHON": "missing-python"},
+    ),
     "no remote named public": (_no_public_remote, "0.1.0", {}),
     "cannot reach public": (_unreachable_public, "0.1.0", {}),
 }
@@ -291,6 +306,212 @@ def test_release_refuses_a_broken_state_with_a_named_reason_and_no_side_effects(
 
     assert result.returncode == 1
     assert f"release refused: {reason}" in result.stderr
+    assert _state(work, public) == before
+
+
+# ---- The credential guard and the drift check ------------------------------
+
+
+def _compose(work, services, env=""):
+    """Commit a compose.yaml of the valid one plus `services`, and declare `env`."""
+    _write(
+        work,
+        {
+            "compose.yaml": VALID_TREE["compose.yaml"] + services,
+            ".env.example": VALID_TREE[".env.example"] + env,
+        },
+    )
+    _commit(work, "edit compose")
+
+
+_LIST_SERVICE = "  app:\n    environment:\n"
+
+EMBEDDED = {
+    "non-empty default": ("      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-admin}\n", "MINIO_ROOT_USER"),
+    "non-empty default without colon": ("      DB_PASSWD: ${DB_PASSWD-secret}\n", "DB_PASSWD"),
+    "alternative value": ("      API_TOKEN: ${API_TOKEN:+secret}\n", "API_TOKEN"),
+    "literal around an interpolation": ("      SMTP_PASSWORD: x${SMTP_PASSWORD}\n", "SMTP_PASSWORD"),
+    "name with SECRET": ("      APP_SECRET_VALUE: s3cr3t\n", "APP_SECRET_VALUE"),
+    "name with CREDENTIAL": ("      GCP_CREDENTIALS: '{}'\n", "GCP_CREDENTIALS"),
+    "name ending in _KEY": ("      STRIPE_KEY: sk_live\n", "STRIPE_KEY"),
+    "interpolated variable under another name": (
+        "      ENDPOINT: ${MINIO_SECRET_KEY:-secret}\n",
+        "MINIO_SECRET_KEY",
+    ),
+    "interpolation in a command string": (
+        '  mc:\n    command: ["sh", "-c", "mc alias set local http://minio:9000 me ${MINIO_SECRET_KEY:-pw}"]\n',
+        "MINIO_SECRET_KEY",
+    ),
+    "unquoted list item": (_LIST_SERVICE + "      - MINIO_ROOT_PASSWORD=admin\n", "MINIO_ROOT_PASSWORD"),
+    "double-quoted list item": (
+        _LIST_SERVICE + '      - "MINIO_ROOT_PASSWORD=admin"\n',
+        "MINIO_ROOT_PASSWORD",
+    ),
+    "single-quoted list item": (
+        _LIST_SERVICE + "      - 'MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY:-admin}'\n",
+        "MINIO_ROOT_PASSWORD",
+    ),
+    "quoted key": ('      "DB_PASSWORD": admin\n', "DB_PASSWORD"),
+    "single-quoted key": ("      'MINIO_ROOT_USER': admin\n", "MINIO_ROOT_USER"),
+    "flow mapping": (
+        "  app:\n    environment: {MINIO_ROOT_PASSWORD: admin}\n",
+        "MINIO_ROOT_PASSWORD",
+    ),
+    "second item of a flow mapping": (
+        "  app:\n    environment: {FOO: x, MINIO_ROOT_PASSWORD: admin}\n",
+        "MINIO_ROOT_PASSWORD",
+    ),
+    "flow mapping inside a flow mapping": (
+        "x-a: {a: {MINIO_ROOT_PASSWORD: admin}}\n",
+        "MINIO_ROOT_PASSWORD",
+    ),
+    "flow mapping inside a flow sequence": (
+        "x-a: {a: [x, {MINIO_ROOT_PASSWORD: admin}]}\n",
+        "MINIO_ROOT_PASSWORD",
+    ),
+    "flow mapping over several lines": (
+        "  app:\n    environment: {\n      FOO: x, MINIO_ROOT_PASSWORD: admin\n    }\n",
+        "MINIO_ROOT_PASSWORD",
+    ),
+    "flow mapping on the next line": (
+        "  app:\n    environment:\n      {MINIO_ROOT_PASSWORD: admin}\n",
+        "MINIO_ROOT_PASSWORD",
+    ),
+    "quoted flow key without a space": (
+        '  app:\n    environment: {"MINIO_ROOT_PASSWORD":admin}\n',
+        "MINIO_ROOT_PASSWORD",
+    ),
+    "anchored flow mapping": (
+        "  app:\n    environment: &env {MINIO_ROOT_PASSWORD: admin}\n",
+        "MINIO_ROOT_PASSWORD",
+    ),
+    "flow mapping under a hyphenated key": (
+        "x-env: {MINIO_ROOT_PASSWORD: admin}\n",
+        "MINIO_ROOT_PASSWORD",
+    ),
+    "explicit key": ("      ? DB_PASSWORD\n      : admin\n", "DB_PASSWORD"),
+    "name with a hyphen": ("      DB-PASSWORD: admin\n", "DB-PASSWORD"),
+    "scalar continued after an allowed first line": (
+        "      DB_PASSWORD: ${MINIO_SECRET_KEY:-}\n        admin\n",
+        "DB_PASSWORD",
+    ),
+    "flow sequence": (
+        '  app:\n    environment: ["MINIO_ROOT_PASSWORD=admin"]\n',
+        "MINIO_ROOT_PASSWORD",
+    ),
+    "list item named with a hyphen": (_LIST_SERVICE + '      - "DB-PASSWORD=admin"\n', "DB-PASSWORD"),
+    "list item named with a dot": (_LIST_SERVICE + '      - "DB.PASSWORD=admin"\n', "DB.PASSWORD"),
+    "list item with a space before the equals sign": (
+        _LIST_SERVICE + '      - "DB_PASSWORD =admin"\n',
+        "DB_PASSWORD ",
+    ),
+    "build argument named with a hyphen": (
+        '  app:\n    build: {context: ., args: ["DB-PASSWORD=admin"]}\n',
+        "DB-PASSWORD",
+    ),
+    "build label": ('  app:\n    build: {context: ., labels: ["API_TOKEN=abc"]}\n', "API_TOKEN"),
+    "label": ('  app:\n    labels: ["API_TOKEN=abc"]\n', "API_TOKEN"),
+    "annotation": ('  app:\n    annotations: ["API_TOKEN=abc"]\n', "API_TOKEN"),
+    "sysctl": ('  app:\n    sysctls: ["API_TOKEN=abc"]\n', "API_TOKEN"),
+    "value on the next line": (
+        _LIST_SERVICE + "      MINIO_ROOT_PASSWORD:\n        # set below\n\n        admin\n",
+        "MINIO_ROOT_PASSWORD",
+    ),
+    "password in a URL": (
+        "      SQL_CONN: postgresql://airflow:hunter2@postgres/airflow\n",
+        "password in a URL under SQL_CONN",
+    ),
+    "password with a slash in a URL": (
+        "      DB_URL: postgres://user:p/ss@host/db\n",
+        "password in a URL under DB_URL",
+    ),
+    "password with a space in a URL": (
+        '      DB_URL: "postgres://user:p ss@host/db"\n',
+        "password in a URL under DB_URL",
+    ),
+    "password in a URL inside a command": (
+        '  mc:\n    command: ["sh", "-c", "psql postgres://me:hunter2@db/x"]\n',
+        "password in a URL under command",
+    ),
+    "password in a URL before an equals sign in a command": (
+        '  mc:\n    command: ["sh", "-c", "psql postgres://me:hunter2@db/x?sslmode=require"]\n',
+        "password in a URL under command",
+    ),
+    "endpoint with a port and a later @": (
+        "      MINIO_ENDPOINT: http://minio:9000/bucket/@scope\n",
+        "password in a URL under MINIO_ENDPOINT",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", EMBEDDED)
+def test_release_refuses_a_credential_embedded_in_compose(repos, case):
+    work, public = repos
+    services, name = EMBEDDED[case]
+    _compose(work, services)
+    before = _state(work, public)
+
+    result = _release(work, "0.1.0")
+
+    assert result.returncode == 1
+    assert f"release refused: credential embedded in compose.yaml: {name}\n" in result.stderr
+    assert _state(work, public) == before
+
+
+ALLOWED = {
+    "bare variable": "      DB_PASSWORD: $MINIO_SECRET_KEY\n",
+    "braced variable": "      DB_PASSWORD: ${MINIO_SECRET_KEY}\n",
+    "empty default without colon": "      DB_PASSWORD: ${MINIO_SECRET_KEY-}\n",
+    "required": "      DB_PASSWORD: ${MINIO_SECRET_KEY:?set it in .env}\n",
+    "required without colon": '      DB_PASSWORD: "${MINIO_SECRET_KEY?set it}"\n',
+    "quoted list item": _LIST_SERVICE + '      - "MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY:-}"\n',
+    "non-credential defaults": "      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-http://minio:9000}\n"
+    "      MINIO_BUCKET: ${MINIO_BUCKET:-factorypulse}\n"
+    "      DATA_DIR: ${DATA_DIR:-/opt/data}\n",
+    "interpolated password in a URL": "      SQL_CONN: postgresql://airflow:${MINIO_SECRET_KEY}@postgres/airflow\n",
+    "escaped dollar": '  mc:\n    command: ["sh", "-c", "echo $$CONTAINER_TOKEN $${CONTAINER_TOKEN:-x}"]\n',
+    "credential name before an equals sign in a command": (
+        '  mc:\n    entrypoint: ["sh", "-c", "[ -n \\"$$MINIO_ROOT_PASSWORD\\" ] && exec minio --address=:9000"]\n'
+    ),
+    "credential setting in a healthcheck": (
+        '  db:\n    healthcheck: {test: ["CMD-SHELL", "PGPASSWORD=$${POSTGRES_PASSWORD} pg_isready -U x"]}\n'
+    ),
+    "empty values": '      MINIO_ROOT_USER:\n      DB_PASSWORD: ""\n      API_TOKEN:  # set in .env\n',
+    "commented credential": "      # MINIO_ROOT_USER: admin\n",
+    "interpolation on the next line": "      MINIO_ROOT_USER:\n        ${MINIO_SECRET_KEY}\n",
+    "flow mapping": (
+        '  app:\n    environment: {MINIO_ROOT_PASSWORD: "${MINIO_SECRET_KEY}", MINIO_BUCKET: x}\n'
+    ),
+}
+
+
+@pytest.mark.parametrize("case", ALLOWED)
+def test_release_accepts_a_compose_that_embeds_no_credential(repos, case):
+    work, _ = repos
+    _compose(work, ALLOWED[case], "MINIO_ENDPOINT=x\nMINIO_BUCKET=x\nDATA_DIR=x\n")
+
+    result = _release(work, "--dry-run", "0.1.0")
+
+    assert result.returncode == 0, result.stderr
+
+
+DRIFT = {
+    "bare variable": "      LOG_DIR: $LOG_DIR\n",
+    "interpolation after an escaped dollar": '  app:\n    command: ["sh", "-c", "echo $$${LOG_DIR}"]\n',
+    "interpolation before an equals sign": '  app:\n    command: ["sh", "-c", "echo ${LOG_DIR} --flag=1"]\n',
+}
+
+
+@pytest.mark.parametrize("case", DRIFT)
+def test_release_refuses_an_undeclared_interpolation(repos, case):
+    work, public = repos
+    _compose(work, DRIFT[case])
+    before = _state(work, public)
+
+    result = _release(work, "0.1.0")
+
+    assert result.returncode == 1
+    assert "release refused: .env.example does not declare: LOG_DIR\n" in result.stderr
     assert _state(work, public) == before
 
 

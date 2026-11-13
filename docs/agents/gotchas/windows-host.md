@@ -12,4 +12,4 @@
 - **Rebuild a `.venv` after moving the repository; do not repair it.** Its
   editable `.pth` points at the old `src`. Detect: `No module named
   'factorypulse'`. Rebuild: `C:\Python314\python.exe -m venv .venv`, then
-  `pip install -e . pytest -r requirements-quality.txt -r requirements-dashboard.txt`.
+  the `pip install` line under the README's `## Tests`.

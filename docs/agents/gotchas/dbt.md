@@ -20,8 +20,8 @@
   whose `not_null` test passes.
 - **Render a dbt macro on the host from its `{% macro %}` block only.** dbt
   never renders the text around a macro; plain `jinja2` renders the whole
-  file, so a header comment that calls the macro fails first. `jinja2` is not
-  a declared dependency: it arrives through `streamlit`. Detect:
+  file, so a header comment that calls the macro fails first. `jinja2` is
+  undeclared: `streamlit` and `great_expectations` bring it. Detect:
   `UndefinedError: 'floats_match' is undefined`.
 - **A text lock on a SQL macro does not prove its NULL branches.** A rewrite
   can keep every locked substring and still turn a one-sided NULL into NULL,

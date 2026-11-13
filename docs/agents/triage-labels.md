@@ -14,6 +14,17 @@ When a skill mentions a role (e.g. "apply the AFK-ready triage label"), use the 
 
 Edit the right-hand column to match whatever vocabulary you actually use.
 
+## Category
+
+An inbound item on the public repository also carries one category label,
+next to its triage role:
+
+- `bug`: something is broken.
+- `enhancement`: a new feature or an improvement.
+
+A category is not a triage role and not a `Status:` value: a ticket file
+carries no category.
+
 ## Lifecycle state
 
 The five roles above describe the *triage queue*: an issue in one of those
@@ -43,6 +54,7 @@ The spec file uses the same line and the same vocabulary.
 ## GitHub labels
 
 On the public repository, these strings are the label names: the same five
-triage roles plus `closed`. This file is the source of truth, so creating or
+triage roles plus `closed`, and the two category labels, which are GitHub's
+defaults. This file is the source of truth, so creating or
 renaming a label on GitHub without editing this table leaves triage writing
 labels that do not exist.

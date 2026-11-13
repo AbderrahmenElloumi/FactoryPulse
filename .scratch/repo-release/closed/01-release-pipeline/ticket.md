@@ -32,3 +32,4 @@ Status: `closed`
 2026-11-11 · review · 2d7642a · block (P1, P2) · .scratch/repo-release/closed/01-release-pipeline/review.md
 2026-11-11 · fix · 6e27db3 · fixed P1, P2, P6, S2 · .scratch/repo-release/closed/01-release-pipeline/review.md
 2026-11-11 · rereview · - · pass · fixed P1, P2, P6, S2 · P3, P4, P5, P7, S1, S3, S4, S5, S6 open, no ticket · .scratch/repo-release/closed/01-release-pipeline/review.md
+2026-11-12 · triage · - · P3, P4 -> 03 · .scratch/repo-release/closed/01-release-pipeline/review.md

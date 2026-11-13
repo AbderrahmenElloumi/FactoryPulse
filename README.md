@@ -180,9 +180,13 @@ Tests that need Docker skip unless you opt in:
 
 ## Repository
 
-This development repository is private. Releases reach a separate public
-repository as one squashed commit per version. `.scratch/repo-release/spec.md`
-specifies the release process. Issues and pull requests arrive on the public
-repository; see `.github/CONTRIBUTING.md`.
+The public repository is <https://github.com/AbderrahmenElloumi/FactoryPulse>.
+It holds releases only, one squashed commit per version. Development happens
+in a private repository. `.scratch/repo-release/spec.md` specifies the release
+process. Issues and pull requests arrive on the public repository; see
+`.github/CONTRIBUTING.md`.
+
+The specs, tickets and reviews under `.scratch/` cite role rules of the agent
+workflow. Those rules are not published.
 
 Distributed under the MIT License. See `LICENSE`.

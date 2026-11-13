@@ -70,16 +70,29 @@ force-pushed.
 
 **The release script.** `scripts/release.sh <version>` performs preflight checks
 — clean working tree, on `main`, test suite green, package metadata version
-equal to the argument, a changelog heading for that version — then builds the
-commit, tags it, and pushes branch and tag to `public`. It supports a dry-run
-that builds and reports the commit without pushing. Every failed preflight exits
-with a named reason and no side effects.
+equal to the argument, a changelog heading for that version, a release tree
+with every required path and no excluded one, a `compose.yaml` that embeds no
+credential and interpolates only variables `.env.example` declares, a `public`
+remote that does not hold the tag yet — then builds the commit, tags it, and
+pushes branch and tag to `public`. The compose checks read compose's own parse,
+so a release needs the docker CLI with its compose plugin, not a running
+daemon. It supports a dry-run that builds and reports the commit without
+pushing. Every failed preflight exits with a named reason and no side effects.
 
 **Importing a contribution.** An accepted pull request is imported into `dev`
 as a patch, and the contributor is credited as a co-author in the commit and by
 name in the changelog entry of the release that carries it. The pull request is
 closed with a comment naming that release. The release repository's `main` never
 receives a commit that did not come from the development line.
+
+**Inbound triage.** Every accepted issue and every accepted pull request
+becomes an internal ticket, whatever its size, and passes the same implement
+and review rounds as internal work. A pull request is read for malicious or
+unsafe changes before any of its code runs, and again at review. Triage is the
+only role that writes to the public repository's issues and pull requests;
+the maintainer confirms each action, and every comment says that an AI wrote
+it. A refused enhancement is recorded, so that the same request is recognised
+when it returns. An accepted item is closed at the release that carries it.
 
 **Two trackers.** GitHub Issues on the public repository hold anything arriving
 from outside; `.scratch/` holds the specs and internal tickets. The rule and the
@@ -97,8 +110,8 @@ live in the development tree and reach the public repository through the release
 squash, so there is never a second copy to keep in sync. The pull request
 template uses the filename GitHub actually detects.
 
-**Secrets.** Every credential currently embedded in compose moves to
-`.env.example` and is interpolated from the environment. `.env` stays ignored.
+**Secrets.** No credential is embedded in compose: each one is templated in
+`.env.example` and interpolated from the environment. `.env` stays ignored.
 One endpoint variable covers the difference between a container reaching MinIO
 by service name and a host process reaching it on localhost.
 
@@ -148,10 +161,5 @@ invariants, and the public-facing documents.
 
 ## Further Notes
 
-- **Blocked by:** `../factorypulse/issues/10-documentation-repo.md` — the README
-  and architecture guide this publishes are that ticket's deliverable.
-- The retracted `v1.0.0` tag means the first version published here will be
-  `v1.0.0`, earned rather than declared. Tags live only in the public
-  repository, so a version number always means exactly one thing.
-- The CI/CD roadmap item in `../factorypulse/spec.md` will be specified in this
-  directory when it is picked up, which is why the feature directory exists.
+- Tags live only in the public repository, so a version number always means
+  exactly one thing.

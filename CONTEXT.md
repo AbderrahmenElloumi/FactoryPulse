@@ -1,9 +1,8 @@
 # FactoryPulse Domain Glossary
 
 Terms as this project uses them. Use these words exactly; do not drift to
-synonyms. This file defines *concepts*, never which module implements them —
-naming an implementation here is how it previously came to describe behaviour
-that had not been built.
+synonyms. This file defines *concepts*, never which module implements them:
+a module name here goes stale and can describe behaviour that is not built.
 
 ## Core Concepts
 
@@ -43,9 +42,8 @@ that had not been built.
 
 ## Analysis
 
-- **Window**: a bounded span of time over which readings are summarised. A
-  rolling window moves with each observation; an hourly or weekly window is
-  fixed to a calendar boundary.
+- **Window**: a bounded span of time over which readings are summarised,
+  fixed to a calendar boundary: an hour or an ISO week.
 - **Anomaly Score**: a per-machine, per-sensor-type, per-window measure of how
   far that sensor's readings deviate from the machine's own recent behaviour,
   expressed as a z-score.
@@ -57,8 +55,9 @@ that had not been built.
 
 ## Quality and Delivery
 
-- **Quality Check**: one named, falsifiable assertion about a table — a schema
-  requirement, a value range, a missingness bound, or a set of allowed values.
+- **Quality Check**: one named, falsifiable assertion about a table, such as a
+  schema requirement, a value range, a missingness bound, or a set of allowed
+  values.
 - **Quality Report**: the outcome of running a set of quality checks against a
   table, naming every check that failed. A report that cannot name a failure is
   not a report.
